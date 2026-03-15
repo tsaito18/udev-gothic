@@ -3,6 +3,7 @@
 # 2つのフォントを合成する
 
 import configparser
+import gc
 import math
 import os
 import shutil
@@ -33,6 +34,7 @@ JPDOC_STR = settings.get("DEFAULT", "JPDOC_STR")
 DOT_ZERO_STR = settings.get("DEFAULT", "DOT_ZERO_STR")
 NERD_FONTS_STR = settings.get("DEFAULT", "NERD_FONTS_STR")
 LIGA_STR = settings.get("DEFAULT", "LIGA_STR")
+RELAXED_STR = settings.get("DEFAULT", "RELAXED_STR")
 EM_ASCENT = int(settings.get("DEFAULT", "EM_ASCENT"))
 EM_DESCENT = int(settings.get("DEFAULT", "EM_DESCENT"))
 OS2_ASCENT = int(settings.get("DEFAULT", "OS2_ASCENT"))
@@ -56,7 +58,7 @@ Copyright 2022 Yuko Otawara
 
 options = {}
 hack_font = None
-nerd_font = None
+nerd_font_unicodes = []
 
 
 def main():
@@ -102,7 +104,7 @@ def main():
 def usage():
     print(
         f"Usage: {sys.argv[0]} "
-        "[--hidden-zenkaku-space] [--35] [--jpdoc] [--nerd-font] [--liga] [--dot-zero]"
+        "[--hidden-zenkaku-space] [--35] [--jpdoc] [--nerd-font] [--liga] [--dot-zero] [--relaxed]"
     )
 
 
@@ -131,6 +133,8 @@ def get_options():
             options["liga"] = True
         elif arg == "--dot-zero":
             options["dot-zero"] = True
+        elif arg == "--relaxed":
+            options["relaxed"] = True
         elif arg == "--debug":
             options["debug"] = True
         else:
@@ -193,6 +197,11 @@ def generate_font(jp_style, eng_style, merged_style):
     if options.get("nerd-font"):
         add_nerd_font_glyphs(jp_font, eng_font)
 
+    # Letter spacing を適用する
+    if options.get("relaxed"):
+        add_letter_spacing(eng_font, options.get("35"))
+        add_letter_spacing(jp_font, options.get("35"))
+
     # オプション毎の修飾子を追加する
     variant = WIDTH_35_STR if options.get("35") else ""
     variant += HIDDEN_ZENKAKU_SPACE_STR if options.get("hidden-zenkaku-space") else ""
@@ -200,6 +209,7 @@ def generate_font(jp_style, eng_style, merged_style):
     variant += JPDOC_STR if options.get("jpdoc") else ""
     variant += NERD_FONTS_STR if options.get("nerd-font") else ""
     variant += LIGA_STR if options.get("liga") else ""
+    variant += (" " + RELAXED_STR) if options.get("relaxed") else ""
 
     # macOSでのpostテーブルの使用性エラー対策
     # 重複するグリフ名を持つグリフをリネームする
@@ -232,8 +242,19 @@ def generate_font(jp_style, eng_style, merged_style):
     )
 
     # ttfを閉じる
-    jp_font.close()
-    eng_font.close()
+    try:
+        jp_font.close()
+    except (RuntimeError, SystemError):
+        pass
+    try:
+        eng_font.close()
+    except (RuntimeError, SystemError):
+        pass
+    del jp_font, eng_font
+    try:
+        gc.collect()
+    except RuntimeError:
+        pass
 
 
 def open_fonts(jp_style: str, eng_style: str):
@@ -644,72 +665,112 @@ def add_box_drawing_block_elements(jp_font, eng_font):
 
 def add_nerd_font_glyphs(jp_font, eng_font):
     """Nerd Fontのグリフを追加する"""
-    global nerd_font
-    # Nerd Fontのグリフを追加する
-    if nerd_font is None:
-        nerd_font = fontforge.open(f"{SOURCE_FONTS_DIR}/SymbolsNerdFont-Regular.ttf")
-        nerd_font.em = EM_ASCENT + EM_DESCENT
-        glyph_names = set()
-        for nerd_glyph in nerd_font.glyphs():
-            # Nerd Fontsのグリフ名をユニークにするため接尾辞を付ける
-            nerd_glyph.glyphname = f"{nerd_glyph.glyphname}-nf"
-            # postテーブルでのグリフ名重複対策
-            # fonttools merge で合成した後、MacOSで `'post'テーブルの使用性` エラーが発生することへの対処
-            if nerd_glyph.glyphname in glyph_names:
-                nerd_glyph.glyphname = f"{nerd_glyph.glyphname}-{nerd_glyph.encoding}"
-            glyph_names.add(nerd_glyph.glyphname)
-            # 幅を調整する
-            half_width = eng_font[0x0030].width
-            # Powerline Symbols の調整
-            if 0xE0B0 <= nerd_glyph.unicode <= 0xE0D7:
-                # 位置と幅合わせ
-                if nerd_glyph.width < half_width:
-                    nerd_glyph.transform(
-                        psMat.translate((half_width - nerd_glyph.width) / 2, 0)
-                    )
-                elif nerd_glyph.width > half_width:
-                    nerd_glyph.transform(psMat.scale(half_width / nerd_glyph.width, 1))
-                # グリフの高さ・位置を調整する
-                nerd_glyph.transform(psMat.scale(1, 1.21))
-                nerd_glyph.transform(psMat.translate(0, -24))
-            elif nerd_glyph.width < (EM_ASCENT + EM_DESCENT) * 0.6:
-                # 幅が狭いグリフは中央寄せとみなして調整する
+    global nerd_font_unicodes
+    # Nerd Fontのグリフを毎回読み込む（mergeFonts後にフォント内部状態が壊れるため）
+    nerd_font = fontforge.open(f"{SOURCE_FONTS_DIR}/SymbolsNerdFont-Regular.ttf")
+    nerd_font.em = EM_ASCENT + EM_DESCENT
+    glyph_names = set()
+    unicodes = []
+    for nerd_glyph in nerd_font.glyphs():
+        # Nerd Fontsのグリフ名をユニークにするため接尾辞を付ける
+        nerd_glyph.glyphname = f"{nerd_glyph.glyphname}-nf"
+        # postテーブルでのグリフ名重複対策
+        # fonttools merge で合成した後、MacOSで `'post'テーブルの使用性` エラーが発生することへの対処
+        if nerd_glyph.glyphname in glyph_names:
+            nerd_glyph.glyphname = f"{nerd_glyph.glyphname}-{nerd_glyph.encoding}"
+        glyph_names.add(nerd_glyph.glyphname)
+        # 幅を調整する
+        half_width = eng_font[0x0030].width
+        # Powerline Symbols の調整
+        if 0xE0B0 <= nerd_glyph.unicode <= 0xE0D7:
+            # 位置と幅合わせ
+            if nerd_glyph.width < half_width:
                 nerd_glyph.transform(
                     psMat.translate((half_width - nerd_glyph.width) / 2, 0)
                 )
-            # 幅を設定
-            nerd_glyph.width = half_width
-    # 日本語フォントにマージするため、既に存在する場合は削除する
-    for nerd_glyph in nerd_font.glyphs():
+            elif nerd_glyph.width > half_width:
+                nerd_glyph.transform(psMat.scale(half_width / nerd_glyph.width, 1))
+            # グリフの高さ・位置を調整する
+            nerd_glyph.transform(psMat.scale(1, 1.21))
+            nerd_glyph.transform(psMat.translate(0, -24))
+        elif nerd_glyph.width < (EM_ASCENT + EM_DESCENT) * 0.6:
+            # 幅が狭いグリフは中央寄せとみなして調整する
+            nerd_glyph.transform(
+                psMat.translate((half_width - nerd_glyph.width) / 2, 0)
+            )
+        # 幅を設定
+        nerd_glyph.width = half_width
         if nerd_glyph.unicode != -1:
-            # 既に存在する場合は削除する
-            try:
-                for glyph in jp_font.selection.select(
-                    ("unicode", None), nerd_glyph.unicode
-                ).byGlyphs:
-                    glyph.clear()
-            except Exception:
-                pass
-            try:
-                for glyph in eng_font.selection.select(
-                    ("unicode", None), nerd_glyph.unicode
-                ).byGlyphs:
-                    glyph.clear()
-            except Exception:
-                pass
+            unicodes.append(nerd_glyph.unicode)
+    nerd_font_unicodes = unicodes
+    # 日本語フォントにマージするため、既に存在する場合は削除する
+    for nerd_unicode in nerd_font_unicodes:
+        try:
+            for glyph in jp_font.selection.select(
+                ("unicode", None), nerd_unicode
+            ).byGlyphs:
+                glyph.clear()
+        except Exception:
+            pass
+        try:
+            for glyph in eng_font.selection.select(
+                ("unicode", None), nerd_unicode
+            ).byGlyphs:
+                glyph.clear()
+        except Exception:
+            pass
     jp_font.mergeFonts(nerd_font)
     jp_font.selection.none()
     eng_font.selection.none()
+    try:
+        nerd_font.close()
+    except (RuntimeError, SystemError):
+        pass
 
 
 def delete_glyphs_with_duplicate_glyph_names(font):
     """重複するグリフ名を持つグリフをリネームする"""
     glyph_name_set = set()
+    rename_targets = []
     for glyph in font.glyphs():
-        if glyph.glyphname in glyph_name_set:
-            glyph.glyphname = f"{glyph.glyphname}_{glyph.encoding}"
+        try:
+            name = glyph.glyphname
+            encoding = glyph.encoding
+        except (RuntimeError, AttributeError):
+            continue
+        if name in glyph_name_set:
+            rename_targets.append((encoding, name))
         else:
-            glyph_name_set.add(glyph.glyphname)
+            glyph_name_set.add(name)
+    for encoding, name in rename_targets:
+        font[encoding].glyphname = f"{name}_{encoding}"
+
+
+def add_letter_spacing(font, is_35):
+    """Relaxed バリアント用にグリフの幅を少し増やす"""
+    extra_unit = 15
+
+    if is_35:
+        base_half_width = int(FULL_WIDTH_35 * 3 / 5)
+        extra_half = extra_unit * 3
+    else:
+        base_half_width = HALF_WIDTH_12
+        extra_half = extra_unit * 2
+
+    for glyph in font.glyphs():
+        try:
+            width = glyph.width
+        except RuntimeError:
+            continue
+        if width <= 0:
+            continue
+
+        ratio = round(width / base_half_width)
+
+        if ratio > 0:
+            extra_width = extra_half * ratio
+            glyph.transform(psMat.translate(extra_width / 2, 0))
+            glyph.width += extra_width
 
 
 def edit_meta_data(font, weight: str, variant: str, cap_height: int, x_height: int):

@@ -21,6 +21,7 @@ BUILD_FONTS_DIR = settings.get("DEFAULT", "BUILD_FONTS_DIR")
 HALF_WIDTH_12 = int(settings.get("DEFAULT", "HALF_WIDTH_12"))
 FULL_WIDTH_35 = int(settings.get("DEFAULT", "FULL_WIDTH_35"))
 WIDTH_35_STR = settings.get("DEFAULT", "WIDTH_35_STR")
+RELAXED_STR = settings.get("DEFAULT", "RELAXED_STR")
 
 
 def main():
@@ -122,7 +123,7 @@ def fix_font_tables(style, variant):
     # OS/2, post テーブルのみのttxファイルを出力
     xml = dump_ttx(input_font_name, output_name_base)
     # OS/2 テーブルを編集
-    fix_os2_table(xml, style, flag_35=WIDTH_35_STR in variant)
+    fix_os2_table(xml, style, flag_35=WIDTH_35_STR in variant, flag_relaxed=RELAXED_STR.strip() in variant)
     # post テーブルを編集
     fix_post_table(xml, flag_35=WIDTH_35_STR in variant)
     # cmap テーブルを編集
@@ -173,7 +174,7 @@ def dump_ttx(input_name_base, output_name_base) -> ET:
     return ET.parse(f"{BUILD_FONTS_DIR}/{output_name_base}.ttx")
 
 
-def fix_os2_table(xml: ET, style: str, flag_35: bool = False):
+def fix_os2_table(xml: ET, style: str, flag_35: bool = False, flag_relaxed: bool = False):
     """OS/2 テーブルを編集する"""
     # xAvgCharWidthを編集
     # タグ形式: <xAvgCharWidth value="1000"/>
@@ -181,6 +182,8 @@ def fix_os2_table(xml: ET, style: str, flag_35: bool = False):
         x_avg_char_width = FULL_WIDTH_35
     else:
         x_avg_char_width = HALF_WIDTH_12
+    if flag_relaxed:
+        x_avg_char_width += 45 if flag_35 else 30
     xml.find("OS_2/xAvgCharWidth").set("value", str(x_avg_char_width))
 
     # fsSelectionを編集
@@ -277,6 +280,9 @@ def fix_cmap_table(xml: ET, style: str, variant: str):
     )
     source_cmap_format_14 = source_xml.find("cmap/cmap_format_14")
     target_cmap = xml.find("cmap")
+    # 既存のcmap_format_14を削除してから追加（重複防止）
+    for existing in target_cmap.findall("cmap_format_14"):
+        target_cmap.remove(existing)
     target_cmap.append(source_cmap_format_14)
 
 
