@@ -59,6 +59,9 @@ Copyright 2022 Yuko Otawara
 options = {}
 hack_font = None
 nerd_font_unicodes = []
+# mergeFonts でマージしたグリフはマージ元フォントの内部データを参照し続けるため、
+# マージ先フォントを生成し終えるまでマージ元を開いたまま保持する
+opened_nerd_fonts = []
 
 
 def main():
@@ -250,6 +253,12 @@ def generate_font(jp_style, eng_style, merged_style):
         eng_font.close()
     except (RuntimeError, SystemError):
         pass
+    # マージ先を閉じた後にマージ元を閉じる
+    while opened_nerd_fonts:
+        try:
+            opened_nerd_fonts.pop().close()
+        except (RuntimeError, SystemError):
+            pass
     del jp_font, eng_font
     try:
         gc.collect()
@@ -722,10 +731,7 @@ def add_nerd_font_glyphs(jp_font, eng_font):
     jp_font.mergeFonts(nerd_font)
     jp_font.selection.none()
     eng_font.selection.none()
-    try:
-        nerd_font.close()
-    except (RuntimeError, SystemError):
-        pass
+    opened_nerd_fonts.append(nerd_font)
 
 
 def delete_glyphs_with_duplicate_glyph_names(font):
